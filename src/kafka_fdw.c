@@ -53,6 +53,14 @@ static int kafkaIsForeignRelUpdatable(Relation rel);
 
 static char *getJsonAttname(Form_pg_attribute attr, StringInfo buff);
 static int   next_work(KafkaScanPData *scan_p, KafkaScanDataDesc *scand);
+static bool kafkaAnalyzeForeignTable(Relation relation,
+                         AcquireSampleRowsFunc *func,
+                         BlockNumber *totalpages);
+static int kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
+                           HeapTuple *rows, int targrows,
+                           double *totalrows,
+                           double *totaldeadrows);
+
 
 /* parallel execution */
 #ifdef DO_PARALLEL
@@ -82,7 +90,7 @@ Datum kafka_fdw_handler(PG_FUNCTION_ARGS)
     fdwroutine->IterateForeignScan  = kafkaIterateForeignScan;
     fdwroutine->ReScanForeignScan   = kafkaReScanForeignScan;
     fdwroutine->EndForeignScan      = kafkaEndForeignScan;
-    fdwroutine->AnalyzeForeignTable = NULL; /* we don't analyze for now */
+    fdwroutine->AnalyzeForeignTable = kafkaAnalyzeForeignTable;
 
     fdwroutine->AddForeignUpdateTargets = NULL;
     fdwroutine->PlanForeignModify       = kafkaPlanForeignModify;
@@ -1413,6 +1421,57 @@ getJsonAttname(Form_pg_attribute attr, StringInfo buff)
     appendStringInfoString(buff, NameStr(attr->attname));
 
     return &buff->data[cur_start];
+}
+
+static bool
+kafkaAnalyzeForeignTable(Relation relation,
+                         AcquireSampleRowsFunc *func,
+                         BlockNumber *totalpages)
+{
+    *func = kafkaAcquireSampleRowsFunc;
+    // totalpages = 1;
+    return true;
+}
+
+static int
+kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
+                           HeapTuple *rows, int targrows,
+                           double *totalrows,
+                           double *totaldeadrows)
+{
+    KafkaFdwExecutionState *festate;
+    char errstr[512];
+    int64 estimate_rows;
+    int i;
+    //KafkaOptions kafka_options;
+    KafkaOptions kafka_options = { DEFAULT_KAFKA_OPTIONS };
+
+    festate = palloc0(sizeof(KafkaFdwExecutionState));
+
+    /* Get options */
+    kafkaGetOptions(RelationGetRelid(relation),
+                    &kafka_options,
+                    &festate->parse_options);
+    festate->kafka_options = kafka_options;
+
+    /* Establish connection */
+    KafkaFdwGetConnection(festate, errstr);   
+
+    /* Query min and max offsets for each partition */
+    for (i = 0; i < festate->partition_list->partition_cnt; i++)
+    {
+        int64_t low, high;
+
+        /* Query min/max offset for partition */
+        rd_kafka_query_watermark_offsets(festate->kafka_handle,
+                festate->kafka_options.topic,
+                i, &low, &high,
+                WARTERMARK_TIMEOUT);
+        estimate_rows += high - low;
+    }
+    kafkaCloseConnection(festate); 
+ 
+    return 0;
 }
 
 #ifdef DO_PARALLEL
