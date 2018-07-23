@@ -8,7 +8,7 @@
 PG_MODULE_MAGIC;
 
 #define MAX(_a, _b) ((_a > _b) ? _a : _b)
-#define MIN_ANALYZE_STEP 100
+#define STEP_FACTOR 20
 
 /*
  * FDW callback routines
@@ -478,7 +478,6 @@ kafkaBeginForeignScan(ForeignScanState *node, int eflags)
     KafkaOptions            kafka_options = { DEFAULT_KAFKA_OPTIONS };
     ParseOptions            parse_options = { .format = -1 };
     KafkaFdwExecutionState *festate;
-    char                    errstr[KAFKA_MAX_ERR_MSG];
     List *                  fdw_private;
     List *                  scan_list;
 
@@ -507,23 +506,7 @@ kafkaBeginForeignScan(ForeignScanState *node, int eflags)
      */
 
     /* Open connection if possible */
-    if (festate->kafka_handle == NULL)
-    {
-        KafkaFdwGetConnection(festate, errstr);
-    }
-
-    if (festate->kafka_handle == NULL)
-    {
-        ereport(ERROR,
-                (errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
-                 errmsg_internal("kafka_fdw: Unable to connect to %s", kafka_options.brokers),
-                 errdetail("%s", errstr)));
-    }
-
-    if (festate->kafka_topic_handle == NULL)
-        ereport(
-          ERROR,
-          (errcode(ERRCODE_FDW_ERROR), errmsg_internal("kafka_fdw: Unable to create topic %s", kafka_options.topic)));
+    KafkaFdwGetConnection(festate);
 
     festate->scanop_list = scan_list;
     festate->buffer      = palloc0(sizeof(rd_kafka_message_t *) * (kafka_options.batch_size));
@@ -1469,8 +1452,8 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
 {
     KafkaFdwExecutionState *festate;
     rd_kafka_message_t **messages;
-    char          errstr[512];
     int64         total = 0;
+    int           p;
     int           partnum;
     int64_t      *low, *high; /* partition bounds */
     KafkaOptions  kafka_options = { DEFAULT_KAFKA_OPTIONS };
@@ -1486,20 +1469,22 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
     festate = makeKafkaExecutionState(relation, &kafka_options, &parse_options);
 
     /* Establish connection */
-    KafkaFdwGetConnection(festate, errstr);   
+    KafkaFdwGetConnection(festate);   
+    partnum = festate->partition_list->partition_cnt;
 
     /* Allocate memory for partition bounds */
-    low = palloc(sizeof(int64_t) * festate->partition_list->partition_cnt);
-    high = palloc(sizeof(int64_t) * festate->partition_list->partition_cnt);
+    low = palloc(sizeof(int64_t) * partnum);
+    high = palloc(sizeof(int64_t) * partnum);
 
     /* Obtain lower and upper bounds for partitions */
-    for (partnum = 0; partnum < festate->partition_list->partition_cnt; partnum++)
+    for (p = 0; p < partnum; p++)
     {
+        /* TODO: check for errors */
         rd_kafka_query_watermark_offsets(festate->kafka_handle,
-                                         festate->kafka_options.topic, partnum,
-                                         &low[partnum], &high[partnum],
+                                         festate->kafka_options.topic, p,
+                                         &low[p], &high[p],
                                          WARTERMARK_TIMEOUT);
-        total += high[partnum] - low[partnum];
+        total += high[p] - low[p];
     }
     *totaldeadrows = 0;
     *totalrows = total;
@@ -1514,14 +1499,15 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
     nulls = palloc(sizeof(bool) * RelationGetDescr(relation)->natts);
 
     /* Get a sample from each partition */
-    for (partnum = 0; partnum < festate->partition_list->partition_cnt; partnum++)
+    for (p = 0; p < partnum; p++)
     {
         int64   partrows, rows_to_read, step;
-        int64   offset = low[partnum];
+        int64   offset = low[p];
         int64   batch_size = kafka_options.batch_size;
         int     batches;
         double  share;
-        int     mes;
+        int     m;
+        bool    catched_error = false;
 
         /*
          * Ideally we need to peak individual messages from the partition evenly for
@@ -1531,24 +1517,24 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
          * Calculate how many batches should we read from this partition and how big
          * steps between those batches should be.
          */
-        partrows     = high[partnum] - low[partnum];  /* rows in current partition */
+        partrows     = high[p] - low[p];           /* rows in current partition */
         share        = partrows / (double) total;
         rows_to_read = share * targrows;
-        batches      = rows_to_read / batch_size;     /* batches number to read */
+        batches      = rows_to_read / batch_size;  /* batches number to read */
         if (batches <= 0)
-            goto finish_acquire;
+            continue;
         step         = batch_size + (partrows - rows_to_read) / batches;
 
         /* Restrict the minimum step size */
-        if (step < batch_size * 10)
-            step = batch_size * 10;
+        if (step < batch_size * STEP_FACTOR)
+            step = batch_size * STEP_FACTOR;
 
         /* Start consuming batches */
-        while (offset < high[partnum])
+        while (offset < high[p])
         {
             int rows_fetched;
 
-            if (rd_kafka_consume_start(festate->kafka_topic_handle, partnum, offset) == -1)
+            if (rd_kafka_consume_start(festate->kafka_topic_handle, p, offset) == -1)
             {
                 rd_kafka_resp_err_t err = rd_kafka_last_error();
                 ereport(ERROR,
@@ -1558,50 +1544,68 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
 
             /* Read next batch */
             rows_fetched = rd_kafka_consume_batch(festate->kafka_topic_handle,
-                                                  partnum,
+                                                  p,
                                                   kafka_options.buffer_delay,
                                                   messages, batch_size);
-
-            for (mes = 0; mes < rows_fetched; mes++)
+            PG_TRY();
             {
-                rd_kafka_resp_err_t err = messages[mes]->err;
-
-                if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
+                for (m = 0; m < rows_fetched; m++)
                 {
-                    ReadKafkaMessage(relation, festate,
-                                     messages[mes],
-                                     CurrentMemoryContext,
-                                     &values, &nulls);
+                    rd_kafka_resp_err_t err = messages[m]->err;
 
-                    Assert(cnt <= targrows);
-                    rows[cnt++] = heap_form_tuple(RelationGetDescr(relation),
-                                                  values, nulls);
-                }
-                else if (err == RD_KAFKA_RESP_ERR__PARTITION_EOF)
-                {
-                    elog(LOG, "kafka_fdw has reached the end of the queue");
-                    rows_fetched = 0;   /* finish scan for this partition */
-                    break;
-                }
-                else if (err != RD_KAFKA_RESP_ERR_NO_ERROR)
-                {
-                    ereport(ERROR,
-                            (errcode(ERRCODE_FDW_ERROR),
-                             errmsg_internal("kafka_fdw got an error %s when fetching a message from queue",
-                                             rd_kafka_err2str(err))));
-                }
+                    if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
+                    {
+                        ReadKafkaMessage(relation, festate,
+                                         messages[m],
+                                         CurrentMemoryContext,
+                                         &values, &nulls);
 
-                rd_kafka_message_destroy(messages[mes]);
+                        Assert(cnt <= targrows);
+                        rows[cnt++] = heap_form_tuple(RelationGetDescr(relation),
+                                                      values, nulls);
+                    }
+                    else if (err == RD_KAFKA_RESP_ERR__PARTITION_EOF)
+                    {
+                        elog(LOG, "kafka_fdw has reached the end of the queue");
+                        rows_fetched = 0;   /* finish scan for this partition */
+                        break;
+                    }
+                    else if (err != RD_KAFKA_RESP_ERR_NO_ERROR)
+                    {
+                        ereport(ERROR,
+                                (errcode(ERRCODE_FDW_ERROR),
+                                 errmsg_internal("kafka_fdw got an error %s when fetching a message from queue",
+                                                 rd_kafka_err2str(err))));
+                    }
+
+                    rd_kafka_message_destroy(messages[m]);
+                }
             }
+            PG_CATCH();
+            {
+                /*
+                 * If any error occurs during parsing messages we should correctly
+                 * release all kafka-related resources and close connection because
+                 * they are not maintaied by postgres' resource manager.
+                 */
+                catched_error = true;
+
+                while (m < rows_fetched)
+                    rd_kafka_message_destroy(messages[m++]);
+            }
+            PG_END_TRY();
 
             /* Finish reading */
-            if (rd_kafka_consume_stop(festate->kafka_topic_handle, partnum) == -1)
+            if (rd_kafka_consume_stop(festate->kafka_topic_handle, p) == -1)
             {
                 rd_kafka_resp_err_t err = rd_kafka_last_error();
                 ereport(ERROR,
                         (errcode(ERRCODE_FDW_ERROR),
                          errmsg_internal("kafka_fdw: Failed to stop consuming: %s", rd_kafka_err2str(err))));
             }
+
+            if (catched_error)
+                goto finish_acquire;
 
             /* We're done here */
             if (rows_fetched <= 0)
@@ -1612,6 +1616,7 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
     }
  
 finish_acquire:
+    /* Finalize connection and quit */
     kafkaCloseConnection(festate); 
 
     /* return actual number */
