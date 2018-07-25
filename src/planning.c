@@ -33,30 +33,41 @@ KafkaEstimateSize(PlannerInfo *root, RelOptInfo *baserel, KafkaFdwPlanState *fdw
         scan_list = lappend(scan_list, NewKafkaScanOp());
     }
 
-    foreach (lc, scan_list)
+    /* Use statistics if we have it */
+    if (baserel->tuples)
     {
-        int          nt, np;
-        KafkaScanOp *scan_op = (KafkaScanOp *) lfirst(lc);
-        np                   = (scan_op->ph_infinite ? highest_p : scan_op->ph) - scan_op->pl + 1;
-        nt                   = scan_op->oh_infinite ? 10000 : (scan_op->oh - scan_op->ol + 1);
-        npart += np;
-        ntuples += np * nt;
-        nbatches += (np * nt) / kafka_options->batch_size;
+        fdw_private->ntuples = ntuples = baserel->tuples;
+        /*
+         * Now estimate the number of rows returned by the scan after applying the
+         * baserestrictinfo quals.
+         */
+        nrows = ntuples *
+            clauselist_selectivity(root,
+                                   baserel->baserestrictinfo,
+                                   0,
+                                   JOIN_INNER,
+                                   NULL);
     }
+    /* No statistics, try to guess */
+    else
+    {
+        foreach (lc, scan_list)
+        {
+            int          nt, np;
+            KafkaScanOp *scan_op = (KafkaScanOp *) lfirst(lc);
+            np                   = (scan_op->ph_infinite ? highest_p : scan_op->ph) - scan_op->pl + 1;
+            nt                   = scan_op->oh_infinite ? 10000 : (scan_op->oh - scan_op->ol + 1);
+            npart += np;
+            ntuples += np * nt;
+            nbatches += (np * nt) / kafka_options->batch_size;
+        }
 
-    /* Estimate relation size we can't do better than hard code for now */
-    fdw_private->ntuples  = ntuples;
-    fdw_private->npart    = npart;
-    fdw_private->nbatches = nbatches;
-
-    /*
-     * Now estimate the number of rows returned by the scan after applying the
-     * baserestrictinfo quals.
-     * we should better remove part and off quals from baserestrictinfo before passing it
-     * to clauselist_selectivity
-     * for now we just use 1.0
-     */
-    nrows = fdw_private->ntuples * 1.0; // clauselist_selectivity(root, baserel->baserestrictinfo, 0, JOIN_INNER, NULL);
+        /* Estimate relation size we can't do better than hard code for now */
+        fdw_private->ntuples  = ntuples;
+        fdw_private->npart    = npart;
+        fdw_private->nbatches = nbatches;
+        nrows = fdw_private->ntuples * 1.0;  /* trivial selectivity */
+    }
 
     nrows = clamp_row_est(nrows);
 
@@ -65,7 +76,6 @@ KafkaEstimateSize(PlannerInfo *root, RelOptInfo *baserel, KafkaFdwPlanState *fdw
     DEBUGLOG("estimated ntuples %d", ntuples);
     DEBUGLOG("estimated npart %d", npart);
     baserel->rows = nrows;
-    // baserel->rows = fdw_private->ntuples;
 }
 
 /*

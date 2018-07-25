@@ -1435,6 +1435,10 @@ getJsonAttname(Form_pg_attribute attr, StringInfo buff)
     return &buff->data[cur_start];
 }
 
+/*
+ * kafkaAnalyzeForeignTable
+ *      ANALYZE support
+ */
 static bool
 kafkaAnalyzeForeignTable(Relation relation,
                          AcquireSampleRowsFunc *func,
@@ -1444,12 +1448,22 @@ kafkaAnalyzeForeignTable(Relation relation,
     return true;
 }
 
+/*
+ * kafkaAcquireSampleRowsFunc
+ *      Extract sample rows for ANALYZE purposes.
+ */
 static int
 kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
                            HeapTuple *rows, int targrows,
                            double *totalrows,
                            double *totaldeadrows)
 {
+#define STORE_ERROR(fmt, ...) \
+    do { \
+        snprintf(errstr, KAFKA_MAX_ERR_MSG, fmt __VA_OPT__(,)__VA_ARGS__); \
+        catched_error = true; \
+    } while (0)
+
     KafkaFdwExecutionState *festate;
     rd_kafka_message_t **messages;
     int64         total = 0;
@@ -1461,6 +1475,8 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
     Datum        *values;
     bool         *nulls;
     int           cnt = 0;
+    bool          catched_error = false;
+    char          errstr[KAFKA_MAX_ERR_MSG];
 
     /* Initialize execution state */
     kafkaGetOptions(RelationGetRelid(relation),
@@ -1479,11 +1495,18 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
     /* Obtain lower and upper bounds for partitions */
     for (p = 0; p < partnum; p++)
     {
-        /* TODO: check for errors */
-        rd_kafka_query_watermark_offsets(festate->kafka_handle,
-                                         festate->kafka_options.topic, p,
-                                         &low[p], &high[p],
-                                         WARTERMARK_TIMEOUT);
+        rd_kafka_resp_err_t    err;
+
+        err = rd_kafka_query_watermark_offsets(festate->kafka_handle,
+                                               festate->kafka_options.topic, p,
+                                               &low[p], &high[p],
+                                               WARTERMARK_TIMEOUT);
+        if (err != RD_KAFKA_RESP_ERR_NO_ERROR && 
+            err != RD_KAFKA_RESP_ERR__UNKNOWN_PARTITION)
+        {
+            STORE_ERROR("Failed to get watermarks %s", rd_kafka_err2str(err));
+            goto finish_acquire_sample;
+        }
         total += high[p] - low[p];
     }
     *totaldeadrows = 0;
@@ -1491,7 +1514,7 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
 
     /* Empty topic */
     if (total == 0)
-        goto finish_acquire;
+        goto finish_acquire_sample;
 
    /* Allocate memory for batch and tuple data */
     messages = palloc(kafka_options.batch_size * sizeof(rd_kafka_message_t *));
@@ -1501,13 +1524,13 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
     /* Get a sample from each partition */
     for (p = 0; p < partnum; p++)
     {
+        MemoryContext oldcontext = CurrentMemoryContext;
         int64   partrows, rows_to_read, step;
         int64   offset = low[p];
         int64   batch_size = kafka_options.batch_size;
         int     batches;
         double  share;
         int     m;
-        bool    catched_error = false;
 
         /*
          * Ideally we need to peak individual messages from the partition evenly for
@@ -1519,7 +1542,7 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
          */
         partrows     = high[p] - low[p];           /* rows in current partition */
         share        = partrows / (double) total;
-        rows_to_read = share * targrows;
+        rows_to_read = share * targrows;           /* rows to read from partition */
         batches      = rows_to_read / batch_size;  /* batches number to read */
         if (batches <= 0)
             continue;
@@ -1537,9 +1560,9 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
             if (rd_kafka_consume_start(festate->kafka_topic_handle, p, offset) == -1)
             {
                 rd_kafka_resp_err_t err = rd_kafka_last_error();
-                ereport(ERROR,
-                        (errcode(ERRCODE_FDW_ERROR),
-                         errmsg_internal("kafka_fdw: Failed to start consuming: %s", rd_kafka_err2str(err))));
+
+                STORE_ERROR("Failed to start consuming: %s", rd_kafka_err2str(err));
+                goto finish_acquire_sample;
             }
 
             /* Read next batch */
@@ -1583,6 +1606,8 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
             }
             PG_CATCH();
             {
+                ErrorData *edata;
+
                 /*
                  * If any error occurs during parsing messages we should correctly
                  * release all kafka-related resources and close connection because
@@ -1592,6 +1617,12 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
 
                 while (m < rows_fetched)
                     rd_kafka_message_destroy(messages[m++]);
+
+                /* Store original error message */
+                MemoryContextSwitchTo(oldcontext);
+                edata = CopyErrorData();
+                FlushErrorState();
+                STORE_ERROR("%s", edata->message);
             }
             PG_END_TRY();
 
@@ -1599,25 +1630,28 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
             if (rd_kafka_consume_stop(festate->kafka_topic_handle, p) == -1)
             {
                 rd_kafka_resp_err_t err = rd_kafka_last_error();
-                ereport(ERROR,
-                        (errcode(ERRCODE_FDW_ERROR),
-                         errmsg_internal("kafka_fdw: Failed to stop consuming: %s", rd_kafka_err2str(err))));
+
+                STORE_ERROR("Failed to stop consuming: %s", rd_kafka_err2str(err));
             }
 
             if (catched_error)
-                goto finish_acquire;
+                goto finish_acquire_sample;
 
             /* We're done here */
             if (rows_fetched <= 0)
                 break;
 
             offset += step;
-        }
-    }
+        }  /* iterate over batches */
+    }  /* iterate over partitions */
  
-finish_acquire:
+finish_acquire_sample:
     /* Finalize connection and quit */
     kafkaCloseConnection(festate); 
+    
+    /* Propagate error if any */
+    if (catched_error)
+        ereport(ERROR, (errcode(ERRCODE_FDW_ERROR), errmsg_internal("%s", errstr)));
 
     /* return actual number */
     return cnt;
