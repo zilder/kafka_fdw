@@ -11,7 +11,7 @@ void
 KafkaEstimateSize(PlannerInfo *root, RelOptInfo *baserel, KafkaFdwPlanState *fdw_private)
 {
     double nrows, nbatches = 0;
-    int    npart = 0, ntuples = 0;
+    int    npart = 0;
 
     ListCell *    lc;
     List *        scan_list     = NIL;
@@ -36,17 +36,17 @@ KafkaEstimateSize(PlannerInfo *root, RelOptInfo *baserel, KafkaFdwPlanState *fdw
     /* Use statistics if we have it */
     if (baserel->tuples)
     {
-        fdw_private->ntuples = ntuples = baserel->tuples;
         /*
          * Now estimate the number of rows returned by the scan after applying the
          * baserestrictinfo quals.
          */
-        nrows = ntuples *
+        nrows = baserel->tuples *
             clauselist_selectivity(root,
                                    baserel->baserestrictinfo,
                                    0,
                                    JOIN_INNER,
                                    NULL);
+        npart = 1;  /* can't get it from statistics */
     }
     /* No statistics, try to guess */
     else
@@ -58,23 +58,21 @@ KafkaEstimateSize(PlannerInfo *root, RelOptInfo *baserel, KafkaFdwPlanState *fdw
             np                   = (scan_op->ph_infinite ? highest_p : scan_op->ph) - scan_op->pl + 1;
             nt                   = scan_op->oh_infinite ? 10000 : (scan_op->oh - scan_op->ol + 1);
             npart += np;
-            ntuples += np * nt;
-            nbatches += (np * nt) / kafka_options->batch_size;
+            nrows += np * nt;
         }
-
-        /* Estimate relation size we can't do better than hard code for now */
-        fdw_private->ntuples  = ntuples;
-        fdw_private->npart    = npart;
-        fdw_private->nbatches = nbatches;
-        nrows = fdw_private->ntuples * 1.0;  /* trivial selectivity */
     }
 
     nrows = clamp_row_est(nrows);
+    nbatches = nrows / kafka_options->batch_size;
+
+    fdw_private->ntuples = (int) nrows;
+    fdw_private->npart = npart;
+    fdw_private->nbatches = nbatches;
 
     /* Save the output-rows estimate for the planner */
     DEBUGLOG("estimated nrows %f", nrows);
-    DEBUGLOG("estimated ntuples %d", ntuples);
-    DEBUGLOG("estimated npart %d", npart);
+    DEBUGLOG("estimated ntuples %d", fdw_private->ntuples);
+    DEBUGLOG("estimated npart %d", fdw_private->npart);
     baserel->rows = nrows;
 }
 
@@ -92,7 +90,7 @@ KafkaEstimateCosts(PlannerInfo *      root,
                    Cost *             run_cost)
 {
     double nbatches = fdw_private->nbatches;
-    double ntuples  = fdw_private->ntuples;
+    double ntuples = baserel->rows;
     Cost   cpu_per_tuple;
 
     *run_cost = 0;

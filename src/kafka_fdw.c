@@ -1458,9 +1458,9 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
                            double *totalrows,
                            double *totaldeadrows)
 {
-#define STORE_ERROR(fmt, ...) \
+#define STORE_ERROR(...) \
     do { \
-        snprintf(errstr, KAFKA_MAX_ERR_MSG, fmt __VA_OPT__(,)__VA_ARGS__); \
+        snprintf(errstr, KAFKA_MAX_ERR_MSG, __VA_ARGS__); \
         catched_error = true; \
     } while (0)
 
@@ -1531,6 +1531,7 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
         int     batches;
         double  share;
         int     m;
+        bool    done = false;
 
         /*
          * Ideally we need to peak individual messages from the partition evenly for
@@ -1570,61 +1571,75 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
                                                   p,
                                                   kafka_options.buffer_delay,
                                                   messages, batch_size);
-            PG_TRY();
+           /* Not empty dataset obtained */
+            if (rows_fetched > 0)
             {
-                for (m = 0; m < rows_fetched; m++)
+                PG_TRY();
                 {
-                    rd_kafka_resp_err_t err = messages[m]->err;
-
-                    if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
+                    for (m = 0; m < rows_fetched; m++)
                     {
-                        ReadKafkaMessage(relation, festate,
-                                         messages[m],
-                                         CurrentMemoryContext,
-                                         &values, &nulls);
+                        rd_kafka_resp_err_t err = messages[m]->err;
 
-                        Assert(cnt <= targrows);
-                        rows[cnt++] = heap_form_tuple(RelationGetDescr(relation),
-                                                      values, nulls);
-                    }
-                    else if (err == RD_KAFKA_RESP_ERR__PARTITION_EOF)
-                    {
-                        elog(LOG, "kafka_fdw has reached the end of the queue");
-                        rows_fetched = 0;   /* finish scan for this partition */
-                        break;
-                    }
-                    else if (err != RD_KAFKA_RESP_ERR_NO_ERROR)
-                    {
-                        ereport(ERROR,
-                                (errcode(ERRCODE_FDW_ERROR),
-                                 errmsg_internal("kafka_fdw got an error %s when fetching a message from queue",
-                                                 rd_kafka_err2str(err))));
-                    }
+                        if (err == RD_KAFKA_RESP_ERR_NO_ERROR)
+                        {
+                            ReadKafkaMessage(relation, festate,
+                                             messages[m],
+                                             CurrentMemoryContext,
+                                             &values, &nulls);
 
-                    rd_kafka_message_destroy(messages[m]);
+                            Assert(cnt <= targrows);
+                            rows[cnt++] = heap_form_tuple(RelationGetDescr(relation),
+                                                          values, nulls);
+                        }
+                        else if (err == RD_KAFKA_RESP_ERR__PARTITION_EOF)
+                        {
+                            elog(LOG, "kafka_fdw has reached the end of the queue");
+                            done = true;   /* finish scan for this partition */
+                            break;
+                        }
+                        else if (err != RD_KAFKA_RESP_ERR_NO_ERROR)
+                        {
+                            ereport(ERROR,
+                                    (errcode(ERRCODE_FDW_ERROR),
+                                     errmsg_internal("kafka_fdw got an error %s when fetching a message from queue",
+                                                     rd_kafka_err2str(err))));
+                        }
+
+                        rd_kafka_message_destroy(messages[m]);
+                    }
                 }
+                PG_CATCH();
+                {
+                    ErrorData *edata;
+
+                    /*
+                     * If any error occurs during parsing messages we should correctly
+                     * release all kafka-related resources and close connection because
+                     * they are not maintaied by postgres' resource manager.
+                     */
+                    catched_error = true;
+
+                    while (m < rows_fetched)
+                        rd_kafka_message_destroy(messages[m++]);
+
+                    /* Store original error message */
+                    MemoryContextSwitchTo(oldcontext);
+                    edata = CopyErrorData();
+                    FlushErrorState();
+                    STORE_ERROR("%s", edata->message);
+                }
+                PG_END_TRY();
             }
-            PG_CATCH();
+            /* Error */
+            else if (rows_fetched < 0)
             {
-                ErrorData *edata;
-
-                /*
-                 * If any error occurs during parsing messages we should correctly
-                 * release all kafka-related resources and close connection because
-                 * they are not maintaied by postgres' resource manager.
-                 */
-                catched_error = true;
-
-                while (m < rows_fetched)
-                    rd_kafka_message_destroy(messages[m++]);
-
-                /* Store original error message */
-                MemoryContextSwitchTo(oldcontext);
-                edata = CopyErrorData();
-                FlushErrorState();
-                STORE_ERROR("%s", edata->message);
+                STORE_ERROR("Failed to consuming a batch");
             }
-            PG_END_TRY();
+            /*
+             * And rows_fetched == 0 means that the request is timed out. We can just
+             * skip it as loosing one single batch during ANALYZE doesn't make much
+             * difference
+             */
 
             /* Finish reading */
             if (rd_kafka_consume_stop(festate->kafka_topic_handle, p) == -1)
@@ -1633,12 +1648,12 @@ kafkaAcquireSampleRowsFunc(Relation relation, int elevel,
 
                 STORE_ERROR("Failed to stop consuming: %s", rd_kafka_err2str(err));
             }
-
+ 
             if (catched_error)
                 goto finish_acquire_sample;
 
-            /* We're done here */
-            if (rows_fetched <= 0)
+            /* Proceed to the next partition */
+            if (done)
                 break;
 
             offset += step;
