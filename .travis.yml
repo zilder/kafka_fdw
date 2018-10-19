@@ -24,12 +24,17 @@ matrix:
      - env: postgres=10
        addons:
             postgresql: 10
+            apt:
+                packages:
+                    - postgresql-10
+                    - postgresql-client-10
+                    - postgresql-server-dev-10
        install:
-            - sudo apt-get install postgresql-server-dev-10 postgresql-client-10
-            - sudo make install
+           #- sudo apt-get install postgresql-10 postgresql-server-dev-10 postgresql-client-10
             - sudo sed -i 's/port = 5433/port = 5432/' /etc/postgresql/10/main/postgresql.conf
             - sudo service postgresql restart
             - cat /etc/postgresql/10/main/postgresql.conf
+            - sudo make install
 #     - env: postgres=11
 #       addons:
 #            postgresql: 11
