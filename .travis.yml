@@ -3,18 +3,18 @@ language: c
 
 matrix:
    include:
-     - env: postgres=9.4
-       addons:
-            postgresql: 9.4
-       install:
-            - sudo apt-get install postgresql-server-dev-9.4
-            - sudo make install
-     - env: postgres=9.5
-       addons:
-            postgresql: 9.5
-       install:
-            - sudo apt-get install postgresql-server-dev-9.5
-            - sudo make install
+#     - env: postgres=9.4
+#       addons:
+#            postgresql: 9.4
+#       install:
+#            - sudo apt-get install postgresql-server-dev-9.4
+#            - sudo make install
+#     - env: postgres=9.5
+#       addons:
+#            postgresql: 9.5
+#       install:
+#            - sudo apt-get install postgresql-server-dev-9.5
+#            - sudo make install
      - env: postgres=9.6
        addons:
             postgresql: 9.6
@@ -27,12 +27,13 @@ matrix:
        install:
             - sudo apt-get install postgresql-10 postgresql-server-dev-10 postgresql-client-10
             - sudo make install
-     - env: postgres=11
-       addons:
-            postgresql: 11
-       install:
-            - sudo apt-get install postgresql-server-dev-11
-            - sudo make install
+            - sudo service postgresql restart
+#     - env: postgres=11
+#       addons:
+#            postgresql: 11
+#       install:
+#            - sudo apt-get install postgresql-server-dev-11
+#            - sudo make install
 #     - env: postgres=10
 #       install:
 #           - sudo /etc/init.d/postgresql stop
