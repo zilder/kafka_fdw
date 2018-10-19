@@ -10,7 +10,7 @@ matrix:
                 packages:
                   - postgresql-server-dev-9.4
         install:
-            - sudo make install
+          - sudo make install
         env: postgres=9.5
         addons:
             postgresql: 9.5
@@ -18,7 +18,7 @@ matrix:
                 packages:
                   - postgresql-server-dev-9.5
         install:
-            - sudo make install
+          - sudo make install
         env: postgres=9.6
         addons:
             postgresql: 9.6
@@ -26,7 +26,7 @@ matrix:
                 packages:
                   - postgresql-server-dev-9.6
         install:
-            - sudo make install
+          - sudo make install
         env: postgres=10
         addons:
             postgresql: 10
@@ -35,11 +35,9 @@ matrix:
                   - postgresql-10
                   - postgresql-client-10
                   - postgresql-server-dev-10
-        env:
-            global:
-              - PGPORT=5433
         install:
-            - sudo make install
+          - export PGPORT=5433
+          - sudo make install
 #     - env: postgres=11
 #       addons:
 #            postgresql: 11
