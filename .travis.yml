@@ -29,11 +29,14 @@ matrix:
                     - postgresql-10
                     - postgresql-client-10
                     - postgresql-server-dev-10
+       env:
+            global:
+                - PGPORT=5433
        install:
            #- sudo apt-get install postgresql-10 postgresql-server-dev-10 postgresql-client-10
-            - sudo sed -i 's/port = 5433/port = 5432/' /etc/postgresql/10/main/postgresql.conf
-            - sudo service postgresql restart
-            - cat /etc/postgresql/10/main/postgresql.conf
+           #- sudo sed -i 's/port = 5433/port = 5432/' /etc/postgresql/10/main/postgresql.conf
+           #- sudo service postgresql restart
+           #- cat /etc/postgresql/10/main/postgresql.conf
             - sudo make install
 #     - env: postgres=11
 #       addons:
