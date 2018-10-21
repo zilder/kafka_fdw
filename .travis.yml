@@ -11,7 +11,7 @@ matrix:
                   - postgresql-server-dev-9.4
         install:
           - sudo make install
-        env: postgres=9.5
+      - env: postgres=9.5
         addons:
             postgresql: 9.5
             apt:
@@ -19,7 +19,7 @@ matrix:
                   - postgresql-server-dev-9.5
         install:
           - sudo make install
-        env: postgres=9.6
+      - env: postgres=9.6
         addons:
             postgresql: 9.6
             apt:
@@ -27,7 +27,7 @@ matrix:
                   - postgresql-server-dev-9.6
         install:
           - sudo make install
-        env: postgres=10
+      - env: postgres=10
         addons:
             postgresql: 10
             apt:
