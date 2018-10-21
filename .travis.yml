@@ -38,24 +38,6 @@ matrix:
         install:
           - export PGPORT=5433
           - sudo make install
-#     - env: postgres=11
-#       addons:
-#            postgresql: 11
-#       install:
-#            - sudo apt-get install postgresql-server-dev-11
-#            - sudo make install
-#     - env: postgres=10
-#       install:
-#           - sudo /etc/init.d/postgresql stop
-#           - wget -q https://www.postgresql.org/media/keys/ACCC4CF8.asc -O - | sudo apt-key add -
-#           - sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ `lsb_release -cs`-pgdg main" >> /etc/apt/sources.list.d/pgdg.list'
-#           - sudo apt-get update
-#           - sudo apt-get install postgresql postgresql-contrib postgresql-client
-#           - sudo apt-get install postgresql-server-dev-10
-#           - sudo sh -c 'echo "port=5432" >> /etc/postgresql/10/main/postgresql.conf'
-#           - sudo pg_ctlcluster 10 main restart
-#           - sudo -u postgres psql  -c "create user travis with superuser";
-#           - sudo make install
 
     allow_failures:
       - env: postgres=9.4
