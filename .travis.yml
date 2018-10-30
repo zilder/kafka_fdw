@@ -41,7 +41,6 @@ matrix:
       - env: postgres=11
         install:
           - sudo service postgresql stop 9.2
-          - sudo service postgresql status
           - sudo apt-get install postgresql-11 postgresql-client-11 postgresql-server-dev-11
           - export PGPORT=5433
           - sudo cat /etc/postgresql/11/main/postgresql.conf
