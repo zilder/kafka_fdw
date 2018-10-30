@@ -32,8 +32,9 @@ matrix:
             postgresql: 10
             apt:
                 packages:
-                  - postgresql-server-dev-10
+                  - postgresql-10
                   - postgresql-client-10
+                  - postgresql-server-dev-10
         install:
           - export PGPORT=5433
           - sudo make install
@@ -42,10 +43,11 @@ matrix:
             postgresql: 11
             apt:
                 packages:
-                  - postgresql-server-dev-11
+                  - postgresql-11
                   - postgresql-client-11
+                  - postgresql-server-dev-11
         install:
-          - sudo cat /etc/postgresql/10/main/postgresql.conf
+          - sudo cat /etc/postgresql/11/main/postgresql.conf
           - sudo make install
 
     allow_failures:
