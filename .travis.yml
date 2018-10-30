@@ -45,7 +45,7 @@ matrix:
                   - postgresql-server-dev-11
                   - postgresql-client-11
         install:
-          - export PGPORT=5433
+          - sudo cat /etc/postgresql/10/main/postgresql.conf
           - sudo make install
 
     allow_failures:
