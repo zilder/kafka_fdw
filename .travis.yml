@@ -40,10 +40,10 @@ matrix:
           - sudo make install
       - env: postgres=11
         install:
-          - sudo service postgresql stop 9.2
           - sudo apt-get remove -y postgresql-9.2
           - sudo apt-get install postgresql-11 postgresql-client-11 postgresql-server-dev-11
           - export PGPORT=5433
+          - sudo -u postgres psql  -c "create user travis with superuser";
           - sudo cat /etc/postgresql/11/main/postgresql.conf
           - sudo make install
 
